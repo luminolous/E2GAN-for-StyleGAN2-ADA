@@ -1,6 +1,6 @@
 # E2GAN-for-StyleGAN2-ADA
 
-E2GAN-inspired selective LoRA fine-tuning extension for [StyleGAN2-ADA](https://github.com/NVlabs/stylegan2-ada-pytorch) (PyTorch).
+<!-- E2GAN-inspired selective LoRA fine-tuning extension for [StyleGAN2-ADA](https://github.com/NVlabs/stylegan2-ada-pytorch) (PyTorch).
 
 This repository preserves the **original StyleGAN2-ADA backbone** and adds a minimal, modular, parameter-efficient fine-tuning path on top of it.
 
@@ -133,6 +133,6 @@ All additions are guarded by `if lora_kwargs:` and have zero effect when LoRA is
 ## License
 
 The original StyleGAN2-ADA code is licensed by NVIDIA Corporation. See [LICENSE.txt](https://github.com/NVlabs/stylegan2-ada-pytorch/blob/main/LICENSE.txt).  
-The E2GAN-LoRA extension code is provided under the MIT license.
+The E2GAN-LoRA extension code is provided under the MIT license. -->
 
 Still under building...
