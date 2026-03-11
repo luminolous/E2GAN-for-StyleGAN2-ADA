@@ -58,6 +58,12 @@ def setup_training_loop_kwargs(
     resume     = None, # Load previous network: 'noresume' (default), 'ffhq256', 'ffhq512', 'ffhq1024', 'celebahq256', 'lsundog256', <file>, <url>
     freezed    = None, # Freeze-D: <int>, default = 0 discriminator layers
 
+    # E2GAN-LoRA options.
+    use_lora         = None, # Enable LoRA adapters on generator: <bool>, default = False
+    lora_rank        = None, # LoRA rank: <int>, default = 4
+    lora_alpha       = None, # LoRA scaling factor: <float>, default = 1.0
+    freeze_g_backbone = None, # Freeze non-LoRA generator params: <bool>, default = True
+
     # Performance options (not included in desc).
     fp32       = None, # Disable mixed-precision training: <bool>, default = False
     nhwc       = None, # Use NHWC memory format with FP16: <bool>, default = False
@@ -356,6 +362,41 @@ def setup_training_loop_kwargs(
             raise UserError('--workers must be at least 1')
         args.data_loader_kwargs.num_workers = workers
 
+    # -----------------------------------
+    # E2GAN-LoRA: use_lora, lora_rank, lora_alpha, freeze_g_backbone
+    # -----------------------------------
+
+    if use_lora is None:
+        use_lora = False
+    assert isinstance(use_lora, bool)
+
+    if use_lora:
+        if lora_rank is None:
+            lora_rank = 4
+        assert isinstance(lora_rank, int)
+        if not lora_rank >= 1:
+            raise UserError('--lora-rank must be at least 1')
+
+        if lora_alpha is None:
+            lora_alpha = 1.0
+        assert isinstance(lora_alpha, float)
+        if not lora_alpha > 0:
+            raise UserError('--lora-alpha must be positive')
+
+        if freeze_g_backbone is None:
+            freeze_g_backbone = True
+        assert isinstance(freeze_g_backbone, bool)
+
+        desc += f'-lora_r{lora_rank}_a{lora_alpha:g}'
+        args.lora_kwargs = dnnlib.EasyDict(
+            rank=lora_rank,
+            alpha=lora_alpha,
+            targets='affine',  # MVP: affine-only
+            freeze_g_backbone=freeze_g_backbone,
+        )
+    else:
+        args.lora_kwargs = None
+
     return desc, args
 
 #----------------------------------------------------------------------------
@@ -434,6 +475,12 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--nobench', help='Disable cuDNN benchmarking', type=bool, metavar='BOOL')
 @click.option('--allow-tf32', help='Allow PyTorch to use TF32 internally', type=bool, metavar='BOOL')
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
+
+# E2GAN-LoRA options.
+@click.option('--use-lora', help='Enable LoRA adapters on generator [default: false]', type=bool, metavar='BOOL')
+@click.option('--lora-rank', help='LoRA rank [default: 4]', type=int, metavar='INT')
+@click.option('--lora-alpha', help='LoRA scaling factor [default: 1.0]', type=float)
+@click.option('--freeze-g-backbone', help='Freeze non-LoRA generator params [default: true]', type=bool, metavar='BOOL')
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper

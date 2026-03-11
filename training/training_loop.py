@@ -118,6 +118,7 @@ def training_loop(
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+    lora_kwargs             = None,     # E2GAN-LoRA options dict. None = disabled (original behavior).
 ):
     # Initialize.
     start_time = time.time()
@@ -159,6 +160,28 @@ def training_loop(
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
+    # E2GAN-LoRA: inject adapters after construction + resume.
+    lora_metadata = None
+    if lora_kwargs is not None:
+        from adapters.inject import inject_lora
+        lora_rank  = lora_kwargs.get('rank', 4)
+        lora_alpha = lora_kwargs.get('alpha', 1.0)
+        lora_targets = lora_kwargs.get('targets', 'affine')
+        freeze_backbone = lora_kwargs.get('freeze_g_backbone', True)
+
+        if rank == 0:
+            print(f'E2GAN-LoRA: injecting adapters (rank={lora_rank}, alpha={lora_alpha}, targets={lora_targets})')
+
+        lora_metadata = inject_lora(G, rank=lora_rank, alpha=lora_alpha, targets=lora_targets)
+        inject_lora(G_ema, rank=lora_rank, alpha=lora_alpha, targets=lora_targets)
+
+        if rank == 0:
+            total_p = lora_metadata['total_params']
+            train_p = lora_metadata['trainable_params']
+            pct = 100.0 * train_p / max(total_p, 1)
+            print(f'E2GAN-LoRA: {train_p:,} / {total_p:,} params trainable ({pct:.2f}%)')
+            print(f'E2GAN-LoRA: adapted layers: {lora_metadata["injected_layers"]}')
+
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
@@ -195,15 +218,22 @@ def training_loop(
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
+        # E2GAN-LoRA: when LoRA is active and this is the G optimizer,
+        # supply only trainable (LoRA) parameters.
+        if lora_kwargs is not None and name == 'G':
+            opt_params = [p for p in module.parameters() if p.requires_grad]
+        else:
+            opt_params = module.parameters()
+
         if reg_interval is None:
-            opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            opt = dnnlib.util.construct_class_by_name(params=opt_params, **opt_kwargs) # subclass of torch.optim.Optimizer
             phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
         else: # Lazy regularization.
             mb_ratio = reg_interval / (reg_interval + 1)
             opt_kwargs = dnnlib.EasyDict(opt_kwargs)
             opt_kwargs.lr = opt_kwargs.lr * mb_ratio
             opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
-            opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            opt = dnnlib.util.construct_class_by_name(opt_params, **opt_kwargs) # subclass of torch.optim.Optimizer
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
     for phase in phases:
@@ -275,7 +305,12 @@ def training_loop(
             if phase.start_event is not None:
                 phase.start_event.record(torch.cuda.current_stream(device))
             phase.opt.zero_grad(set_to_none=True)
-            phase.module.requires_grad_(True)
+            # E2GAN-LoRA: for G phases, only enable grad on LoRA params.
+            if lora_kwargs is not None and phase.name.startswith('G'):
+                for p in phase.module.parameters():
+                    p.requires_grad_(getattr(p, '_is_lora', False))
+            else:
+                phase.module.requires_grad_(True)
 
             # Accumulate gradients over multiple rounds.
             for round_idx, (real_img, real_c, gen_z, gen_c) in enumerate(zip(phase_real_img, phase_real_c, phase_gen_z, phase_gen_c)):
@@ -365,6 +400,14 @@ def training_loop(
             if rank == 0:
                 with open(snapshot_pkl, 'wb') as f:
                     pickle.dump(snapshot_data, f)
+
+            # E2GAN-LoRA: save adapter-only checkpoint alongside the full snapshot.
+            if lora_kwargs is not None and rank == 0:
+                from adapters.inject import extract_lora_state_dict
+                adapter_ckpt = extract_lora_state_dict(snapshot_data['G_ema'])
+                adapter_path = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}_lora.pt')
+                torch.save(adapter_ckpt, adapter_path)
+                print(f'E2GAN-LoRA: saved adapter checkpoint to {adapter_path}')
 
         # Evaluate metrics.
         if (snapshot_data is not None) and (len(metrics) > 0):

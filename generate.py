@@ -43,6 +43,7 @@ def num_range(s: str) -> List[int]:
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w', help='Projection result file', type=str, metavar='FILE')
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
+@click.option('--lora-ckpt', help='Optional LoRA adapter checkpoint (.pt)', type=str, default=None, metavar='FILE')
 def generate_images(
     ctx: click.Context,
     network_pkl: str,
@@ -51,7 +52,8 @@ def generate_images(
     noise_mode: str,
     outdir: str,
     class_idx: Optional[int],
-    projected_w: Optional[str]
+    projected_w: Optional[str],
+    lora_ckpt: Optional[str],
 ):
     """Generate images using pretrained network pickle.
 
@@ -76,12 +78,26 @@ def generate_images(
     # Render an image from projected W
     python generate.py --outdir=out --projected_w=projected_w.npz \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metfaces.pkl
+
+    \b
+    # Generate with LoRA adapter
+    python generate.py --outdir=out --seeds=0-3 \\
+        --network=base_model.pkl --lora-ckpt=adapter_lora.pt
     """
 
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+
+    # E2GAN-LoRA: optionally load adapter weights.
+    if lora_ckpt is not None:
+        from adapters.inject import load_lora_state_dict
+        print(f'Loading LoRA adapter from "{lora_ckpt}"...')
+        ckpt = torch.load(lora_ckpt, map_location=device)
+        lora_meta = load_lora_state_dict(G, ckpt)
+        print(f'LoRA: injected {len(lora_meta["injected_layers"])} adapter layers '
+              f'(rank={lora_meta["rank"]}, alpha={lora_meta["alpha"]})')
 
     os.makedirs(outdir, exist_ok=True)
 
